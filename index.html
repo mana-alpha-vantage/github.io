@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>売買ルール実験場</title>
+<style>
+/* レイアウト: 「いまの成績 → 資産の動きのグラフ → 売買の記録」を1列に並べる */
+:root {
+  --bg: #f3f4f1;
+  --panel: #ffffff;
+  --text: #1d211c;
+  --sub: #5e665b;
+  --line: #d3d8cf;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --font-body: "Hiragino Sans", "Yu Gothic", "Noto Sans JP", sans-serif;
+  --font-num: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --space: 16px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141613; --panel: #1d201c; --text: #eceee9; --sub: #a3aa9f; --line: #363b34;
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
+    color-scheme: dark;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.7;
+  padding: 24px var(--space);
+}
+main { max-width: 860px; margin: 0 auto; display: grid; gap: var(--space); }
+h1 { font-size: 24px; margin: 0; }
+h2 { font-size: 16px; margin: 0; }
+p { margin: 0; color: var(--sub); }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: var(--space);
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space); }
+.value { font-family: var(--font-num); font-size: 26px; font-weight: 600; }
+.num { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+
+/* 系列の色見本（グラフの線と同じ色） */
+.dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 6px; }
+.color-0 { background: var(--series-1); stroke: var(--series-1); }
+.color-1 { background: var(--series-2); stroke: var(--series-2); }
+.color-2 { background: var(--series-3); stroke: var(--series-3); }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 13px; }
+
+.chart { position: relative; }
+svg { width: 100%; display: block; }
+.series { fill: none; stroke-width: 2; stroke-linejoin: round; }
+.grid { stroke: var(--line); stroke-width: 1; }
+.cursor { stroke: var(--sub); stroke-width: 1; }
+.axis { fill: var(--sub); font-size: 11px; font-family: var(--font-num); }
+.end { fill: var(--text); font-size: 12px; font-family: var(--font-body); }
+#tip {
+  position: absolute; top: 8px; pointer-events: none;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 4px;
+  padding: 6px 10px; font-size: 13px; white-space: nowrap;
+}
+
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; }
+th, td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
+th { font-size: 12px; color: var(--sub); font-weight: 400; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>売買ルール実験場</h1>
+    <p id="summary">データを読み込んでいます。</p>
+  </header>
+
+  <section class="cards" id="cards"></section>
+
+  <section class="panel">
+    <h2>資産の動き（ドル）</h2>
+    <div class="legend" id="legend"></div>
+    <div class="chart">
+      <svg id="chart" viewBox="0 0 720 300" role="img" aria-label="ルールごとの資産の動き"></svg>
+      <div id="tip" hidden></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>売買の記録（新しい順）</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>日付</th><th>ルール</th><th>売買</th><th>株価（ドル）</th></tr></thead>
+        <tbody id="trades"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <p>お金は架空で、株価は本物の終値です。その日の終値で売買できたものとし、手数料、税金、為替は入れていません。過去の成績は将来の成績を保証しません。</p>
+</main>
+
+<script>
+// グラフの寸法
+const W = 720, H = 300;
+const LEFT = 48, RIGHT = 120, TOP = 12, BOTTOM = 28;
+
+const el = id => document.getElementById(id);
+const money = value => '$' + value.toFixed(2);
+const signed = value => (value >= 0 ? '+' : '−') + Math.abs(value).toFixed(2);
+
+let data = null;
+let scaleX = null;
+let scaleY = null;
+
+// ---------- いまの成績 ----------
+function renderCards() {
+  el('cards').innerHTML = data.rules.map((r, i) => {
+    const now = r.values[r.values.length - 1];
+    const gain = now - data.start_cash;
+    const percent = gain / data.start_cash * 100;
+    return `
+      <div class="panel">
+        <h2><span class="dot color-${i}"></span>${r.name}</h2>
+        <div class="value">${money(now)}</div>
+        <div class="num">${signed(gain)} ドル（${signed(percent)}%）</div>
+        <p>${r.holding ? 'いま株を持っている' : 'いま現金で待っている'}。売買 ${r.trades.length} 回。</p>
+        <p>${r.note}</p>
+      </div>`;
+  }).join('');
+}
+
+// ---------- グラフ ----------
+function renderChart() {
+  const all = data.rules.flatMap(r => r.values);
+  const low = Math.min(...all), high = Math.max(...all);
+  const pad = (high - low) * 0.1 || 1;
+  const last = data.dates.length - 1;
+  scaleX = i => LEFT + (W - LEFT - RIGHT) * (last === 0 ? 0 : i / last);
+  scaleY = v => TOP + (H - TOP - BOTTOM) * (1 - (v - (low - pad)) / (high - low + pad * 2));
+
+  let svg = '';
+  // 横の目盛り線（4本）
+  for (let k = 0; k <= 3; k++) {
+    const v = low - pad + (high - low + pad * 2) * k / 3;
+    svg += `<line class="grid" x1="${LEFT}" x2="${W - RIGHT}" y1="${scaleY(v)}" y2="${scaleY(v)}"/>`;
+    svg += `<text class="axis" x="${LEFT - 6}" y="${scaleY(v) + 4}" text-anchor="end">${Math.round(v)}</text>`;
+  }
+  // 日付（最初、真ん中、最後）
+  [0, Math.round(last / 2), last].forEach((i, k) => {
+    const anchor = ['start', 'middle', 'end'][k];
+    svg += `<text class="axis" x="${scaleX(i)}" y="${H - 8}" text-anchor="${anchor}">${data.dates[i]}</text>`;
+  });
+  // 線
+  data.rules.forEach((r, n) => {
+    const points = r.values.map((v, i) => `${scaleX(i).toFixed(1)},${scaleY(v).toFixed(1)}`).join(' ');
+    svg += `<polyline class="series color-${n}" points="${points}"/>`;
+  });
+  // 線の右端に名前を書く（重ならないよう、上から順に14px以上あける）
+  const ends = data.rules.map((r, n) => ({ name: r.name, y: scaleY(r.values[last]) }));
+  ends.sort((a, b) => a.y - b.y);
+  ends.forEach((e, k) => {
+    if (k > 0 && e.y < ends[k - 1].y + 14) e.y = ends[k - 1].y + 14;
+    svg += `<text class="end" x="${W - RIGHT + 8}" y="${e.y + 4}">${e.name}</text>`;
+  });
+  svg += `<line class="cursor" id="cursor" y1="${TOP}" y2="${H - BOTTOM}" x1="0" x2="0" visibility="hidden"/>`;
+  el('chart').innerHTML = svg;
+
+  el('legend').innerHTML = data.rules.map((r, n) => `<span><span class="dot color-${n}"></span>${r.name}</span>`).join('');
+}
+
+// グラフの上にカーソルを置くと、その日の値を出す
+function showTip(e) {
+  const box = el('chart').getBoundingClientRect();
+  const x = (e.clientX - box.left) / box.width * W;
+  const last = data.dates.length - 1;
+  const ratio = (x - LEFT) / (W - LEFT - RIGHT);
+  const i = Math.min(last, Math.max(0, Math.round(ratio * last)));
+
+  el('cursor').setAttribute('x1', scaleX(i));
+  el('cursor').setAttribute('x2', scaleX(i));
+  el('cursor').setAttribute('visibility', 'visible');
+
+  const lines = data.rules.map((r, n) => `<div><span class="dot color-${n}"></span>${r.name} <span class="num">${money(r.values[i])}</span></div>`);
+  el('tip').innerHTML = `<div class="num">${data.dates[i]}　株価 ${money(data.closes[i])}</div>` + lines.join('');
+  el('tip').hidden = false;
+  // 右半分では左側に、左半分では右側に出す
+  const px = scaleX(i) / W * box.width;
+  el('tip').style.left = i > last / 2 ? '' : (px + 12) + 'px';
+  el('tip').style.right = i > last / 2 ? (box.width - px + 12) + 'px' : '';
+}
+
+function hideTip() {
+  el('tip').hidden = true;
+  el('cursor').setAttribute('visibility', 'hidden');
+}
+
+// ---------- 売買の記録 ----------
+function renderTrades() {
+  const rows = [];
+  data.rules.forEach((r, n) => r.trades.forEach(t => rows.push({ date: t.date, n: n, name: r.name, action: t.action, price: t.price })));
+  rows.sort((a, b) => b.date.localeCompare(a.date));
+  el('trades').innerHTML = rows.map(t => `
+    <tr>
+      <td class="num">${t.date}</td>
+      <td><span class="dot color-${t.n}"></span>${t.name}</td>
+      <td>${t.action === 'buy' ? '買い' : '売り'}</td>
+      <td class="num">${t.price.toFixed(2)}</td>
+    </tr>`).join('');
+}
+
+// ---------- 読み込み ----------
+fetch('data.json')
+  .then(response => response.json())
+  .then(json => {
+    data = json;
+    el('summary').textContent = `${data.symbol} を、架空の元金 ${money(data.start_cash)} で売買しています。${data.dates[0]} から ${data.dates[data.dates.length - 1]} まで。最終更新 ${data.updated}。`;
+    renderCards();
+    renderChart();
+    renderTrades();
+    el('chart').addEventListener('pointermove', showTip);
+    el('chart').addEventListener('pointerleave', hideTip);
+  })
+  .catch(() => {
+    el('summary').textContent = 'まだデータがありません。GitHub Actions の「毎日の売買」を1回動かすと表示されます。';
+  });
+</script>
+</body>
+</html>
