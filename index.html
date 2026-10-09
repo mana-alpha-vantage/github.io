@@ -153,6 +153,20 @@ select { font: inherit; color: var(--text); background: var(--bg); border: 1px s
 
   <div class="view" id="viewPast" hidden>
   <section class="panel">
+    <h2>あのとき200ドルぶん買って、持ち続けていたら</h2>
+    <label>買った時期
+      <select id="lookback"></select>
+    </label>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>項目</th><th>ドル</th><th>日本円</th></tr></thead>
+        <tbody id="lookbackRows"></tbody>
+      </table>
+    </div>
+    <p>日本円は、買った日と今の、それぞれの為替で換算しています。株価の動きと為替の動きの両方が入ります。配当、手数料、税金は入れていません。</p>
+  </section>
+
+  <section class="panel">
     <h2>同じルールを過去の株価に当てた結果</h2>
     <p id="backtestNote"></p>
     <div class="scroll">
@@ -348,6 +362,47 @@ function renderYears() {
   }).join('');
 }
 
+// ---------- あのとき200ドルぶん買っていたら ----------
+const yen = value => Math.round(value).toLocaleString('ja-JP') + '円';
+
+function renderLookbackOptions() {
+  const look = data.lookback;
+  if (!look) {
+    el('lookbackRows').innerHTML = '<tr><td colspan="3">次の自動実行のあとに表示されます。</td></tr>';
+    return;
+  }
+  el('lookback').innerHTML = look.rows.map((row, i) => `<option value="${i}">${row.label}（${row.date}）</option>`).join('');
+  // 最初は「1年前」を選んでおく
+  const oneYear = look.rows.findIndex(row => row.label === '1年前');
+  if (oneYear >= 0) el('lookback').value = oneYear;
+  renderLookback();
+}
+
+function renderLookback() {
+  const look = data.lookback;
+  const then = look.rows[Number(el('lookback').value)];
+  const cash = data.start_cash;
+  const now = cash * look.close / then.close;      // 今の価値（ドル）
+  const gain = now - cash;
+
+  // 為替が取れていないときは、円の欄を「—」にする
+  const hasRate = then.rate && look.rate;
+  const costYen = hasRate ? cash * then.rate : 0;   // 買うのに必要だった円
+  const nowYen = hasRate ? now * look.rate : 0;     // 今の価値（円）
+  const gainYen = nowYen - costYen;
+  const show = text => hasRate ? text : '—';
+
+  const rows = [
+    ['買った日の株価', money(then.close), show(`1ドル ${then.rate && then.rate.toFixed(2)}円`)],
+    [`今の株価（${look.date}）`, money(look.close), show(`1ドル ${look.rate && look.rate.toFixed(2)}円`)],
+    ['買うのに使ったお金', money(cash), show(yen(costYen))],
+    ['今の価値', money(now), show(yen(nowYen))],
+    ['損益', signed(gain) + ' ドル', show((gainYen >= 0 ? '+' : '−') + yen(Math.abs(gainYen)))],
+    ['損益（%）', signed(gain / cash * 100) + '%', show(signed(gainYen / (costYen || 1) * 100) + '%')]
+  ];
+  el('lookbackRows').innerHTML = rows.map(r => `<tr><td>${r[0]}</td><td class="num">${r[1]}</td><td class="num">${r[2]}</td></tr>`).join('');
+}
+
 // ---------- 画面の切り替え ----------
 function showView(name) {
   el('viewLive').hidden = name !== 'live';
@@ -407,6 +462,8 @@ fetch('data.json')
     // 古い形式のデータには月ごとの値がないので、その場合は空として扱う
     drawChart('past', data.backtest.dates || [], data.backtest.closes || [], data.backtest.rows);
     renderYears();
+    renderLookbackOptions();
+    el('lookback').addEventListener('change', renderLookback);
     ['live', 'past'].forEach(name => {
       el(name).addEventListener('pointermove', showTip);
       el(name).addEventListener('pointerleave', hideTip);

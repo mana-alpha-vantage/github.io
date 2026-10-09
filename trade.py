@@ -10,7 +10,7 @@ import json
 import os
 import time
 import urllib.request
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 SYMBOL = "SPY"                 # 対象（S&P500に連動するETF）
 START_CASH = 200.0             # 架空の元金（ドル）。約3万円
@@ -22,15 +22,15 @@ DATA_FILE = "data.json"
 
 
 # ---------- 株価 ----------
-def fetch_closes(function, extra=""):
-    """Alpha Vantage から終値を取る。戻り値は {日付: 終値}"""
+def fetch_closes(query):
+    """Alpha Vantage から終値を取る。query は「function=...&symbol=...」の部分。戻り値は {日付: 終値}"""
     key = os.environ["ALPHAVANTAGE_KEY"]
-    url = f"https://www.alphavantage.co/query?function={function}&symbol={SYMBOL}{extra}&apikey={key}"
+    url = f"https://www.alphavantage.co/query?{query}&apikey={key}"
     with urllib.request.urlopen(url, timeout=30) as response:
         body = json.load(response)
     series = [value for name, value in body.items() if "Time Series" in name]
     if not series:
-        raise SystemExit(f"株価を取得できませんでした（{function}）: {body}")
+        raise SystemExit(f"データを取得できませんでした（{query}）: {body}")
     return {date: float(day["4. close"]) for date, day in series[0].items()}
 
 
@@ -187,13 +187,73 @@ def run_backtest(month_dates, month_closes):
             "dates": dates, "closes": closes, "rows": rows}
 
 
+# ---------- 「あのとき200ドル買っていたら」用のデータ ----------
+def shift_months(day_text, months):
+    """日付を months か月前にずらす（日は28日までに丸める）"""
+    day = date.fromisoformat(day_text)
+    total = day.year * 12 + (day.month - 1) - months
+    return date(total // 12, total % 12 + 1, min(day.day, 28)).isoformat()
+
+
+def last_on_or_before(series, target):
+    """target 以前でいちばん新しい日付を返す。なければ None"""
+    found = [day for day in series if day <= target]
+    return max(found) if found else None
+
+
+def build_lookback(all_prices, all_rates, daily_dates):
+    """過去のいろいろな時点の株価と為替を集める。
+
+    3日前までは毎日、1か月以内は1週間ごと、10か月前までは2か月ごと、それより前は1年ごと。
+    all_prices と all_rates は {日付: 値}（日ごとと月ごとを合わせたもの）。
+    """
+    latest = daily_dates[-1]
+    latest_day = date.fromisoformat(latest)
+
+    targets = []
+    for n in (1, 2, 3):
+        if len(daily_dates) > n:
+            targets.append((f"{n}取引日前", daily_dates[-1 - n]))
+    for n in (1, 2, 3, 4):
+        targets.append((f"{n}週間前", (latest_day - timedelta(days=7 * n)).isoformat()))
+    for n in (2, 4, 6, 8, 10):
+        targets.append((f"{n}か月前", shift_months(latest, n)))
+    for n in range(1, 41):
+        targets.append((f"{n}年前", shift_months(latest, 12 * n)))
+
+    def rate_on(day):
+        found = last_on_or_before(all_rates, day)
+        return all_rates[found] if found else None
+
+    rows = []
+    for label, target in targets:
+        day = last_on_or_before(all_prices, target)
+        if day is None:
+            continue   # そこまで古いデータがない
+        rows.append({"label": label, "date": day, "close": all_prices[day], "rate": rate_on(day)})
+    return {"date": latest, "close": all_prices[latest], "rate": rate_on(latest), "rows": rows}
+
+
+def fetch_rates():
+    """ドル円の為替（日ごとと月ごと）を取る。取れなければ空にして、株価の計算は続ける。"""
+    try:
+        time.sleep(15)
+        rates = fetch_closes("function=FX_MONTHLY&from_symbol=USD&to_symbol=JPY")
+        time.sleep(15)
+        rates.update(fetch_closes("function=FX_DAILY&from_symbol=USD&to_symbol=JPY"))
+        return rates
+    except SystemExit as error:
+        print(error)
+        return {}
+
+
 def main():
     prices = load_json(PRICES_FILE, {})
-    prices.update(fetch_closes("TIME_SERIES_DAILY", "&outputsize=compact"))
+    prices.update(fetch_closes(f"function=TIME_SERIES_DAILY&symbol={SYMBOL}&outputsize=compact"))
     save_json(PRICES_FILE, prices)
 
     time.sleep(15)   # 無料キーは続けて呼ぶと断られるので、少し待つ
-    monthly = fetch_closes("TIME_SERIES_MONTHLY")
+    monthly = fetch_closes(f"function=TIME_SERIES_MONTHLY&symbol={SYMBOL}")
 
     # 今月ぶんは月の途中なので、終わった月だけを使う
     this_month = max(prices)[:7]
@@ -201,6 +261,11 @@ def main():
     month_closes = [monthly[date] for date in month_dates]
 
     dates, closes, results = run_live(prices, month_dates, month_closes)
+
+    # 月ごとの古い株価と、日ごとの新しい株価を1つにまとめる
+    all_prices = dict(zip(month_dates, month_closes))
+    all_prices.update(prices)
+    lookback = build_lookback(all_prices, fetch_rates(), sorted(prices))
 
     save_json(DATA_FILE, {
         "updated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
@@ -211,6 +276,7 @@ def main():
         "closes": closes,
         "rules": results,
         "backtest": run_backtest(month_dates, month_closes),
+        "lookback": lookback,
     })
 
 
