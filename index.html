@@ -80,6 +80,8 @@ svg { width: 100%; display: block; }
 table { border-collapse: collapse; width: 100%; }
 th, td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
 th { font-size: 12px; color: var(--sub); font-weight: 400; }
+td.reason { white-space: normal; min-width: 260px; }
+select { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 6px 10px; }
 </style>
 </head>
 <body>
@@ -90,6 +92,32 @@ th { font-size: 12px; color: var(--sub); font-weight: 400; }
   </header>
 
   <section class="cards" id="cards"></section>
+
+  <section class="panel">
+    <h2>期間ごとの損益</h2>
+    <label>期間
+      <select id="period">
+        <option value="1">1日</option>
+        <option value="3">3日</option>
+        <option value="7">7日</option>
+        <option value="14">2週間</option>
+        <option value="30">1か月</option>
+        <option value="61">2か月</option>
+        <option value="122">4か月</option>
+        <option value="183">6か月</option>
+        <option value="243">8か月</option>
+        <option value="304">10か月</option>
+        <option value="365">1年</option>
+      </select>
+    </label>
+    <p id="periodNote"></p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>ルール</th><th>期間の始めの資産</th><th>今の資産</th><th>損益（ドル）</th><th>損益（%）</th></tr></thead>
+        <tbody id="periodRows"></tbody>
+      </table>
+    </div>
+  </section>
 
   <section class="panel">
     <h2>資産の動き（ドル）</h2>
@@ -105,10 +133,11 @@ th { font-size: 12px; color: var(--sub); font-weight: 400; }
     <h2>売買の記録（新しい順）</h2>
     <div class="scroll">
       <table>
-        <thead><tr><th>日付</th><th>ルール</th><th>売買</th><th>金額（ドル）</th><th>株価（ドル）</th></tr></thead>
+        <thead><tr><th>日付</th><th>ルール</th><th>売買</th><th>金額（ドル）</th><th>株価（ドル）</th><th>何をもとに、どう判断したか</th></tr></thead>
         <tbody id="trades"></tbody>
       </table>
     </div>
+    <p>売買の時刻は、どれも米国市場が閉まる時刻（ニューヨーク時間の16時、日本時間では翌朝5時または6時）です。その日の最後の株価で売買したものとして記録しています。</p>
   </section>
 
   <section class="panel">
@@ -153,6 +182,42 @@ function renderCards() {
         <p>${r.holding ? 'いま株を持っている' : 'いま現金で待っている'}。売買 ${r.trades.length} 回。</p>
         <p>${r.note}</p>
       </div>`;
+  }).join('');
+}
+
+// ---------- 期間ごとの損益 ----------
+// 最新の記録の日から、選んだ日数だけさかのぼった日の資産と比べる。
+// その日が休みなら、それより前でいちばん近い記録の日を使う。
+function renderPeriod() {
+  const days = Number(el('period').value);
+  const last = data.dates.length - 1;
+  if (last < 0) {
+    el('periodNote').textContent = 'まだ記録がありません。';
+    el('periodRows').innerHTML = '';
+    return;
+  }
+  const target = new Date(data.dates[last] + 'T00:00:00Z');
+  target.setUTCDate(target.getUTCDate() - days);
+  const targetText = target.toISOString().slice(0, 10);
+  const base = data.dates.findLastIndex(date => date <= targetText);
+  if (base < 0) {
+    el('periodNote').textContent = `記録がまだ足りません。この期間を見るには、${targetText} 以前の記録が必要です（記録の開始は ${data.dates[0]}）。`;
+    el('periodRows').innerHTML = '';
+    return;
+  }
+  el('periodNote').textContent = `${data.dates[base]} の終値から ${data.dates[last]} の終値までの変化です。`;
+  el('periodRows').innerHTML = data.rules.map((r, n) => {
+    const before = r.values[base];
+    const now = r.values[last];
+    const gain = now - before;
+    return `
+      <tr>
+        <td><span class="dot color-${n}"></span>${r.name}</td>
+        <td class="num">${before.toFixed(2)}</td>
+        <td class="num">${now.toFixed(2)}</td>
+        <td class="num">${signed(gain)}</td>
+        <td class="num">${signed(gain / before * 100)}%</td>
+      </tr>`;
   }).join('');
 }
 
@@ -228,7 +293,7 @@ function renderTrades() {
   const rows = [];
   data.rules.forEach((r, n) => r.trades.forEach(t => rows.push({ n: n, name: r.name, trade: t })));
   rows.sort((a, b) => b.trade.date.localeCompare(a.trade.date));
-  const empty = '<tr><td colspan="5">まだ売買はありません。</td></tr>';
+  const empty = '<tr><td colspan="6">まだ売買はありません。</td></tr>';
   el('trades').innerHTML = rows.map(row => `
     <tr>
       <td class="num">${row.trade.date}</td>
@@ -236,6 +301,7 @@ function renderTrades() {
       <td>${row.trade.action === 'buy' ? '買い' : '売り'}</td>
       <td class="num">${row.trade.amount.toFixed(2)}</td>
       <td class="num">${row.trade.price.toFixed(2)}</td>
+      <td class="reason">${row.trade.reason}</td>
     </tr>`).join('') || empty;
 }
 
@@ -262,6 +328,8 @@ fetch('data.json')
     const period = days ? `記録は ${data.dates[0]} から ${data.dates[days - 1]} まで（${days} 日ぶん）。` : `記録は ${data.live_start} 以降の最初の取引日から始まります。`;
     el('summary').textContent = `${data.symbol} を、架空の元金 ${money(data.start_cash)} で売買しています。${period}最終更新 ${data.updated}。`;
     renderCards();
+    renderPeriod();
+    el('period').addEventListener('change', renderPeriod);
     renderChart();
     renderTrades();
     renderBacktest();

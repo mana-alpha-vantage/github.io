@@ -48,9 +48,9 @@ def save_json(path, value):
 
 # ---------- ルール ----------
 # 各ルールは、その日の状況 day を見て、次のどれかを返す。
-#   ("buy", 金額)  その金額ぶん買う
-#   ("sell", 0)    持っている株を全部売る
-#   None           何もしない
+#   ("buy", 金額, 理由)  その金額ぶん買う
+#   ("sell", 0, 理由)    持っている株を全部売る
+#   None                 何もしない
 # day の中身:
 #   first      記録の最初の日か
 #   new_month  月が変わって最初の取引日か
@@ -59,7 +59,7 @@ def save_json(path, value):
 def rule_hold(day):
     """買って持つだけ: 最初の日に全額で買い、売らない"""
     if day["first"]:
-        return ("buy", day["cash"])
+        return ("buy", day["cash"], "記録の最初の日なので、全額で買った。このあとは売らない。")
     return None
 
 
@@ -68,18 +68,21 @@ def rule_average(day):
     if not day["new_month"] or len(day["months"]) < AVERAGE_MONTHS:
         return None
     average = sum(day["months"][-AVERAGE_MONTHS:]) / AVERAGE_MONTHS
-    above = day["months"][-1] > average
+    last = day["months"][-1]
+    above = last > average
+    basis = f"直近の月末の終値 {last:.2f} が、過去10か月の平均 {average:.2f} より"
     if above and day["shares"] == 0:
-        return ("buy", day["cash"])
+        return ("buy", day["cash"], basis + "上。上り調子と判断して、全額で買った。")
     if not above and day["shares"] > 0:
-        return ("sell", 0)
+        return ("sell", 0, basis + "下。下り調子と判断して、全部売って現金にした。")
     return None
 
 
 def rule_monthly(day):
     """毎月の積立: 元金を10回に分け、毎月1回、同じ金額ずつ買う"""
     if day["new_month"] and day["buys"] < PARTS:
-        return ("buy", START_CASH / PARTS)
+        count = day["buys"] + 1
+        return ("buy", START_CASH / PARTS, f"月が変わったので、決まった金額を買った（{count}回目／{PARTS}回）。株価は見ていない。")
     return None
 
 
@@ -118,12 +121,12 @@ def simulate(rule, dates, closes, known_months):
             shares += amount / closes[i]
             cash -= amount
             buys += 1
-            trades.append({"date": dates[i], "action": "buy", "price": closes[i], "amount": round(amount, 2)})
+            trades.append({"date": dates[i], "action": "buy", "price": closes[i], "amount": round(amount, 2), "reason": action[2]})
         if action and action[0] == "sell":
             amount = shares * closes[i]
             cash += amount
             shares = 0.0
-            trades.append({"date": dates[i], "action": "sell", "price": closes[i], "amount": round(amount, 2)})
+            trades.append({"date": dates[i], "action": "sell", "price": closes[i], "amount": round(amount, 2), "reason": action[2]})
         values.append(round(cash + shares * closes[i], 2))
     return {"values": values, "trades": trades, "holding": shares > 0}
 
