@@ -181,8 +181,10 @@ def run_backtest(month_dates, month_closes):
             "yearly": round(((final / START_CASH) ** (1 / years) - 1) * 100, 1),
             "drop": biggest_drop(result["values"]),
             "trades": len(result["trades"]),
+            "values": result["values"],      # グラフ用: 月ごとの資産
         })
-    return {"from": dates[0], "to": dates[-1], "years": round(years, 1), "rows": rows}
+    return {"from": dates[0], "to": dates[-1], "years": round(years, 1),
+            "dates": dates, "closes": closes, "rows": rows}
 
 
 def main():

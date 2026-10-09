@@ -52,6 +52,10 @@ p { margin: 0; color: var(--sub); }
   gap: 8px;
   align-content: start;
 }
+.view { display: grid; gap: var(--space); }
+.tabs { display: flex; gap: 8px; }
+button { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 8px 16px; cursor: pointer; }
+button.current { background: var(--text); color: var(--panel); border-color: var(--text); }
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space); }
 .value { font-family: var(--font-num); font-size: 26px; font-weight: 600; }
 .num { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
@@ -70,7 +74,7 @@ svg { width: 100%; display: block; }
 .cursor { stroke: var(--sub); stroke-width: 1; }
 .axis { fill: var(--sub); font-size: 11px; font-family: var(--font-num); }
 .end { fill: var(--text); font-size: 12px; font-family: var(--font-body); }
-#tip {
+.tip {
   position: absolute; top: 8px; pointer-events: none;
   background: var(--panel); border: 1px solid var(--line); border-radius: 4px;
   padding: 6px 10px; font-size: 13px; white-space: nowrap;
@@ -91,6 +95,12 @@ select { font: inherit; color: var(--text); background: var(--bg); border: 1px s
     <p id="summary">データを読み込んでいます。</p>
   </header>
 
+  <nav class="tabs">
+    <button type="button" id="tabLive" class="current">今日からの記録</button>
+    <button type="button" id="tabPast">過去のデータ</button>
+  </nav>
+
+  <div class="view" id="viewLive">
   <section class="cards" id="cards"></section>
 
   <section class="panel">
@@ -121,11 +131,11 @@ select { font: inherit; color: var(--text); background: var(--bg); border: 1px s
 
   <section class="panel">
     <h2>資産の動き（ドル）</h2>
-    <div class="legend" id="legend"></div>
-    <p id="chartNote" hidden>記録が2日ぶんたまると、ここにグラフが出ます。</p>
-    <div class="chart" id="chartBox">
-      <svg id="chart" viewBox="0 0 720 300" role="img" aria-label="ルールごとの資産の動き"></svg>
-      <div id="tip" hidden></div>
+    <div class="legend" id="liveLegend"></div>
+    <p id="liveNote" hidden>記録が2日ぶんたまると、ここにグラフが出ます。</p>
+    <div class="chart" id="liveBox">
+      <svg id="live" viewBox="0 0 720 300" role="img" aria-label="今日からの、ルールごとの資産の動き"></svg>
+      <div class="tip" id="liveTip" hidden></div>
     </div>
   </section>
 
@@ -139,9 +149,11 @@ select { font: inherit; color: var(--text); background: var(--bg); border: 1px s
     </div>
     <p>売買の時刻は、どれも米国市場が閉まる時刻（ニューヨーク時間の16時、日本時間では翌朝5時または6時）です。その日の最後の株価で売買したものとして記録しています。</p>
   </section>
+  </div>
 
+  <div class="view" id="viewPast" hidden>
   <section class="panel">
-    <h2>過去の検証（同じルールを過去の株価に当てた結果）</h2>
+    <h2>同じルールを過去の株価に当てた結果</h2>
     <p id="backtestNote"></p>
     <div class="scroll">
       <table>
@@ -151,6 +163,28 @@ select { font: inherit; color: var(--text); background: var(--bg); border: 1px s
     </div>
     <p>月末の株価だけで計算し、配当、手数料、税金、為替は入れていません。配当を入れないぶん、どのルールも実際より低く出ます。</p>
   </section>
+
+  <section class="panel">
+    <h2>過去の資産の動き（ドル）</h2>
+    <div class="legend" id="pastLegend"></div>
+    <p id="pastNote" hidden>次の自動実行のあとに、ここにグラフが出ます。</p>
+    <div class="chart" id="pastBox">
+      <svg id="past" viewBox="0 0 720 300" role="img" aria-label="過去の、ルールごとの資産の動き"></svg>
+      <div class="tip" id="pastTip" hidden></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>年ごとの損益（新しい順）</h2>
+    <div class="scroll">
+      <table>
+        <thead id="yearHead"></thead>
+        <tbody id="yearRows"></tbody>
+      </table>
+    </div>
+    <p>その年の最後の資産を、前の年の最後の資産と比べた増減です。</p>
+  </section>
+  </div>
 
   <p>お金は架空で、株価は本物の終値です。その日の終値で売買できたものとし、手数料、税金、為替は入れていません。過去の成績は将来の成績を保証しません。</p>
 </main>
@@ -165,8 +199,6 @@ const money = value => '$' + value.toFixed(2);
 const signed = value => (value >= 0 ? '+' : '−') + Math.abs(value).toFixed(2);
 
 let data = null;
-let scaleX = null;
-let scaleY = null;
 
 // ---------- いまの成績 ----------
 function renderCards() {
@@ -221,71 +253,107 @@ function renderPeriod() {
   }).join('');
 }
 
-// ---------- グラフ ----------
-function renderChart() {
-  el('legend').innerHTML = data.rules.map((r, n) => `<span><span class="dot color-${n}"></span>${r.name}</span>`).join('');
+// ---------- グラフ（「今日から」と「過去」の両方で使う） ----------
+// name は 'live' か 'past'。画面の部品は name, nameBox, nameNote, nameLegend, nameTip という id を持つ。
+const charts = {};
 
-  const last = data.dates.length - 1;
-  el('chartNote').hidden = last >= 1;
-  el('chartBox').hidden = last < 1;
+function drawChart(name, dates, closes, rules) {
+  el(name + 'Legend').innerHTML = rules.map((r, n) => `<span><span class="dot color-${n}"></span>${r.name}</span>`).join('');
+
+  const last = dates.length - 1;
+  el(name + 'Note').hidden = last >= 1;
+  el(name + 'Box').hidden = last < 1;
   if (last < 1) return;
 
-  const all = data.rules.flatMap(r => r.values);
+  const all = rules.flatMap(r => r.values);
   const low = Math.min(...all), high = Math.max(...all);
   const pad = (high - low) * 0.1 || 1;
-  scaleX = i => LEFT + (W - LEFT - RIGHT) * i / last;
-  scaleY = v => TOP + (H - TOP - BOTTOM) * (1 - (v - (low - pad)) / (high - low + pad * 2));
+  const digits = high - low > 50 ? 0 : 1;
+  const scaleX = i => LEFT + (W - LEFT - RIGHT) * i / last;
+  const scaleY = v => TOP + (H - TOP - BOTTOM) * (1 - (v - (low - pad)) / (high - low + pad * 2));
+  charts[name] = { dates: dates, closes: closes, rules: rules, scaleX: scaleX };
 
   let svg = '';
   // 横の目盛り線（4本）
   for (let k = 0; k <= 3; k++) {
     const v = low - pad + (high - low + pad * 2) * k / 3;
     svg += `<line class="grid" x1="${LEFT}" x2="${W - RIGHT}" y1="${scaleY(v)}" y2="${scaleY(v)}"/>`;
-    svg += `<text class="axis" x="${LEFT - 6}" y="${scaleY(v) + 4}" text-anchor="end">${v.toFixed(1)}</text>`;
+    svg += `<text class="axis" x="${LEFT - 6}" y="${scaleY(v) + 4}" text-anchor="end">${v.toFixed(digits)}</text>`;
   }
   // 日付（最初と最後）
-  svg += `<text class="axis" x="${scaleX(0)}" y="${H - 8}">${data.dates[0]}</text>`;
-  svg += `<text class="axis" x="${scaleX(last)}" y="${H - 8}" text-anchor="end">${data.dates[last]}</text>`;
+  svg += `<text class="axis" x="${scaleX(0)}" y="${H - 8}">${dates[0]}</text>`;
+  svg += `<text class="axis" x="${scaleX(last)}" y="${H - 8}" text-anchor="end">${dates[last]}</text>`;
   // 線
-  data.rules.forEach((r, n) => {
+  rules.forEach((r, n) => {
     const points = r.values.map((v, i) => `${scaleX(i).toFixed(1)},${scaleY(v).toFixed(1)}`).join(' ');
     svg += `<polyline class="series color-${n}" points="${points}"/>`;
   });
   // 線の右端に名前を書く（重ならないよう、上から順に14px以上あける）
-  const ends = data.rules.map(r => ({ name: r.name, y: scaleY(r.values[last]) }));
+  const ends = rules.map(r => ({ name: r.name, y: scaleY(r.values[last]) }));
   ends.sort((a, b) => a.y - b.y);
   ends.forEach((e, k) => {
     if (k > 0 && e.y < ends[k - 1].y + 14) e.y = ends[k - 1].y + 14;
     svg += `<text class="end" x="${W - RIGHT + 8}" y="${e.y + 4}">${e.name}</text>`;
   });
-  svg += `<line class="cursor" id="cursor" y1="${TOP}" y2="${H - BOTTOM}" x1="0" x2="0" visibility="hidden"/>`;
-  el('chart').innerHTML = svg;
+  svg += `<line class="cursor" id="${name}Cursor" y1="${TOP}" y2="${H - BOTTOM}" x1="0" x2="0" visibility="hidden"/>`;
+  el(name).innerHTML = svg;
 }
 
 // グラフの上にカーソルを置くと、その日の値を出す
 function showTip(e) {
-  const box = el('chart').getBoundingClientRect();
+  const name = e.currentTarget.id;
+  const c = charts[name];
+  if (!c) return;
+  const box = el(name).getBoundingClientRect();
   const x = (e.clientX - box.left) / box.width * W;
-  const last = data.dates.length - 1;
+  const last = c.dates.length - 1;
   const ratio = (x - LEFT) / (W - LEFT - RIGHT);
   const i = Math.min(last, Math.max(0, Math.round(ratio * last)));
 
-  el('cursor').setAttribute('x1', scaleX(i));
-  el('cursor').setAttribute('x2', scaleX(i));
-  el('cursor').setAttribute('visibility', 'visible');
+  el(name + 'Cursor').setAttribute('x1', c.scaleX(i));
+  el(name + 'Cursor').setAttribute('x2', c.scaleX(i));
+  el(name + 'Cursor').setAttribute('visibility', 'visible');
 
-  const lines = data.rules.map((r, n) => `<div><span class="dot color-${n}"></span>${r.name} <span class="num">${money(r.values[i])}</span></div>`);
-  el('tip').innerHTML = `<div class="num">${data.dates[i]}　株価 ${money(data.closes[i])}</div>` + lines.join('');
-  el('tip').hidden = false;
+  const tip = el(name + 'Tip');
+  const lines = c.rules.map((r, n) => `<div><span class="dot color-${n}"></span>${r.name} <span class="num">${money(r.values[i])}</span></div>`);
+  tip.innerHTML = `<div class="num">${c.dates[i]}　株価 ${money(c.closes[i])}</div>` + lines.join('');
+  tip.hidden = false;
   // 右半分では左側に、左半分では右側に出す
-  const px = scaleX(i) / W * box.width;
-  el('tip').style.left = i > last / 2 ? '' : (px + 12) + 'px';
-  el('tip').style.right = i > last / 2 ? (box.width - px + 12) + 'px' : '';
+  const px = c.scaleX(i) / W * box.width;
+  tip.style.left = i > last / 2 ? '' : (px + 12) + 'px';
+  tip.style.right = i > last / 2 ? (box.width - px + 12) + 'px' : '';
 }
 
-function hideTip() {
-  el('tip').hidden = true;
-  el('cursor').setAttribute('visibility', 'hidden');
+function hideTip(e) {
+  const name = e.currentTarget.id;
+  el(name + 'Tip').hidden = true;
+  if (el(name + 'Cursor')) el(name + 'Cursor').setAttribute('visibility', 'hidden');
+}
+
+// ---------- 年ごとの損益（過去のデータ） ----------
+function renderYears() {
+  const b = data.backtest;
+  if (!b.dates) return;
+  // その年の最後の月が、何番目かを集める
+  const lastOfYear = {};
+  b.dates.forEach((date, i) => { lastOfYear[date.slice(0, 4)] = i; });
+  const years = Object.keys(lastOfYear).sort().reverse();
+
+  el('yearHead').innerHTML = '<tr><th>年</th>' + b.rows.map((row, n) => `<th><span class="dot color-${n}"></span>${row.name}</th>`).join('') + '</tr>';
+  el('yearRows').innerHTML = years.map(year => {
+    const now = lastOfYear[year];
+    const before = lastOfYear[year - 1] === undefined ? 0 : lastOfYear[year - 1];
+    const cells = b.rows.map(row => `<td class="num">${signed((row.values[now] / row.values[before] - 1) * 100)}%</td>`);
+    return `<tr><td class="num">${year}</td>${cells.join('')}</tr>`;
+  }).join('');
+}
+
+// ---------- 画面の切り替え ----------
+function showView(name) {
+  el('viewLive').hidden = name !== 'live';
+  el('viewPast').hidden = name !== 'past';
+  el('tabLive').className = name === 'live' ? 'current' : '';
+  el('tabPast').className = name === 'past' ? 'current' : '';
 }
 
 // ---------- 売買の記録 ----------
@@ -320,6 +388,9 @@ function renderBacktest() {
 }
 
 // ---------- 読み込み ----------
+el('tabLive').addEventListener('click', () => showView('live'));
+el('tabPast').addEventListener('click', () => showView('past'));
+
 fetch('data.json')
   .then(response => response.json())
   .then(json => {
@@ -330,11 +401,16 @@ fetch('data.json')
     renderCards();
     renderPeriod();
     el('period').addEventListener('change', renderPeriod);
-    renderChart();
+    drawChart('live', data.dates, data.closes, data.rules);
     renderTrades();
     renderBacktest();
-    el('chart').addEventListener('pointermove', showTip);
-    el('chart').addEventListener('pointerleave', hideTip);
+    // 古い形式のデータには月ごとの値がないので、その場合は空として扱う
+    drawChart('past', data.backtest.dates || [], data.backtest.closes || [], data.backtest.rows);
+    renderYears();
+    ['live', 'past'].forEach(name => {
+      el(name).addEventListener('pointermove', showTip);
+      el(name).addEventListener('pointerleave', hideTip);
+    });
   })
   .catch(() => {
     el('summary').textContent = 'まだデータがありません。GitHub Actions の「毎日の売買」を1回動かすと表示されます。';
