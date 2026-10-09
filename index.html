@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>売買ルール実験場</title>
 <style>
-/* レイアウト: 「いまの成績 → 資産の動きのグラフ → 売買の記録」を1列に並べる */
+/* レイアウト: 「いまの成績 → 資産の動きのグラフ → 売買の記録 → 過去の検証」を1列に並べる */
 :root {
   --bg: #f3f4f1;
   --panel: #ffffff;
@@ -40,6 +40,7 @@ main { max-width: 860px; margin: 0 auto; display: grid; gap: var(--space); }
 h1 { font-size: 24px; margin: 0; }
 h2 { font-size: 16px; margin: 0; }
 p { margin: 0; color: var(--sub); }
+[hidden] { display: none !important; }
 
 .panel {
   background: var(--panel);
@@ -93,7 +94,8 @@ th { font-size: 12px; color: var(--sub); font-weight: 400; }
   <section class="panel">
     <h2>資産の動き（ドル）</h2>
     <div class="legend" id="legend"></div>
-    <div class="chart">
+    <p id="chartNote" hidden>記録が2日ぶんたまると、ここにグラフが出ます。</p>
+    <div class="chart" id="chartBox">
       <svg id="chart" viewBox="0 0 720 300" role="img" aria-label="ルールごとの資産の動き"></svg>
       <div id="tip" hidden></div>
     </div>
@@ -103,10 +105,22 @@ th { font-size: 12px; color: var(--sub); font-weight: 400; }
     <h2>売買の記録（新しい順）</h2>
     <div class="scroll">
       <table>
-        <thead><tr><th>日付</th><th>ルール</th><th>売買</th><th>株価（ドル）</th></tr></thead>
+        <thead><tr><th>日付</th><th>ルール</th><th>売買</th><th>金額（ドル）</th><th>株価（ドル）</th></tr></thead>
         <tbody id="trades"></tbody>
       </table>
     </div>
+  </section>
+
+  <section class="panel">
+    <h2>過去の検証（同じルールを過去の株価に当てた結果）</h2>
+    <p id="backtestNote"></p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>ルール</th><th>最後の資産（ドル）</th><th>1年あたりの伸び</th><th>いちばん大きい下落</th><th>売買の回数</th></tr></thead>
+        <tbody id="backtest"></tbody>
+      </table>
+    </div>
+    <p>月末の株価だけで計算し、配当、手数料、税金、為替は入れていません。配当を入れないぶん、どのルールも実際より低く出ます。</p>
   </section>
 
   <p>お金は架空で、株価は本物の終値です。その日の終値で売買できたものとし、手数料、税金、為替は入れていません。過去の成績は将来の成績を保証しません。</p>
@@ -128,7 +142,7 @@ let scaleY = null;
 // ---------- いまの成績 ----------
 function renderCards() {
   el('cards').innerHTML = data.rules.map((r, i) => {
-    const now = r.values[r.values.length - 1];
+    const now = r.values.length ? r.values[r.values.length - 1] : data.start_cash;
     const gain = now - data.start_cash;
     const percent = gain / data.start_cash * 100;
     return `
@@ -144,11 +158,17 @@ function renderCards() {
 
 // ---------- グラフ ----------
 function renderChart() {
+  el('legend').innerHTML = data.rules.map((r, n) => `<span><span class="dot color-${n}"></span>${r.name}</span>`).join('');
+
+  const last = data.dates.length - 1;
+  el('chartNote').hidden = last >= 1;
+  el('chartBox').hidden = last < 1;
+  if (last < 1) return;
+
   const all = data.rules.flatMap(r => r.values);
   const low = Math.min(...all), high = Math.max(...all);
   const pad = (high - low) * 0.1 || 1;
-  const last = data.dates.length - 1;
-  scaleX = i => LEFT + (W - LEFT - RIGHT) * (last === 0 ? 0 : i / last);
+  scaleX = i => LEFT + (W - LEFT - RIGHT) * i / last;
   scaleY = v => TOP + (H - TOP - BOTTOM) * (1 - (v - (low - pad)) / (high - low + pad * 2));
 
   let svg = '';
@@ -156,20 +176,18 @@ function renderChart() {
   for (let k = 0; k <= 3; k++) {
     const v = low - pad + (high - low + pad * 2) * k / 3;
     svg += `<line class="grid" x1="${LEFT}" x2="${W - RIGHT}" y1="${scaleY(v)}" y2="${scaleY(v)}"/>`;
-    svg += `<text class="axis" x="${LEFT - 6}" y="${scaleY(v) + 4}" text-anchor="end">${Math.round(v)}</text>`;
+    svg += `<text class="axis" x="${LEFT - 6}" y="${scaleY(v) + 4}" text-anchor="end">${v.toFixed(1)}</text>`;
   }
-  // 日付（最初、真ん中、最後）
-  [0, Math.round(last / 2), last].forEach((i, k) => {
-    const anchor = ['start', 'middle', 'end'][k];
-    svg += `<text class="axis" x="${scaleX(i)}" y="${H - 8}" text-anchor="${anchor}">${data.dates[i]}</text>`;
-  });
+  // 日付（最初と最後）
+  svg += `<text class="axis" x="${scaleX(0)}" y="${H - 8}">${data.dates[0]}</text>`;
+  svg += `<text class="axis" x="${scaleX(last)}" y="${H - 8}" text-anchor="end">${data.dates[last]}</text>`;
   // 線
   data.rules.forEach((r, n) => {
     const points = r.values.map((v, i) => `${scaleX(i).toFixed(1)},${scaleY(v).toFixed(1)}`).join(' ');
     svg += `<polyline class="series color-${n}" points="${points}"/>`;
   });
   // 線の右端に名前を書く（重ならないよう、上から順に14px以上あける）
-  const ends = data.rules.map((r, n) => ({ name: r.name, y: scaleY(r.values[last]) }));
+  const ends = data.rules.map(r => ({ name: r.name, y: scaleY(r.values[last]) }));
   ends.sort((a, b) => a.y - b.y);
   ends.forEach((e, k) => {
     if (k > 0 && e.y < ends[k - 1].y + 14) e.y = ends[k - 1].y + 14;
@@ -177,8 +195,6 @@ function renderChart() {
   });
   svg += `<line class="cursor" id="cursor" y1="${TOP}" y2="${H - BOTTOM}" x1="0" x2="0" visibility="hidden"/>`;
   el('chart').innerHTML = svg;
-
-  el('legend').innerHTML = data.rules.map((r, n) => `<span><span class="dot color-${n}"></span>${r.name}</span>`).join('');
 }
 
 // グラフの上にカーソルを置くと、その日の値を出す
@@ -210,14 +226,30 @@ function hideTip() {
 // ---------- 売買の記録 ----------
 function renderTrades() {
   const rows = [];
-  data.rules.forEach((r, n) => r.trades.forEach(t => rows.push({ date: t.date, n: n, name: r.name, action: t.action, price: t.price })));
-  rows.sort((a, b) => b.date.localeCompare(a.date));
-  el('trades').innerHTML = rows.map(t => `
+  data.rules.forEach((r, n) => r.trades.forEach(t => rows.push({ n: n, name: r.name, trade: t })));
+  rows.sort((a, b) => b.trade.date.localeCompare(a.trade.date));
+  const empty = '<tr><td colspan="5">まだ売買はありません。</td></tr>';
+  el('trades').innerHTML = rows.map(row => `
     <tr>
-      <td class="num">${t.date}</td>
-      <td><span class="dot color-${t.n}"></span>${t.name}</td>
-      <td>${t.action === 'buy' ? '買い' : '売り'}</td>
-      <td class="num">${t.price.toFixed(2)}</td>
+      <td class="num">${row.trade.date}</td>
+      <td><span class="dot color-${row.n}"></span>${row.name}</td>
+      <td>${row.trade.action === 'buy' ? '買い' : '売り'}</td>
+      <td class="num">${row.trade.amount.toFixed(2)}</td>
+      <td class="num">${row.trade.price.toFixed(2)}</td>
+    </tr>`).join('') || empty;
+}
+
+// ---------- 過去の検証 ----------
+function renderBacktest() {
+  const b = data.backtest;
+  el('backtestNote').textContent = `${b.from} から ${b.to} までの約 ${b.years} 年間、${money(data.start_cash)} で始めた場合です。`;
+  el('backtest').innerHTML = b.rows.map((row, n) => `
+    <tr>
+      <td><span class="dot color-${n}"></span>${row.name}</td>
+      <td class="num">${row.final.toFixed(2)}</td>
+      <td class="num">${signed(row.yearly)}%</td>
+      <td class="num">−${row.drop.toFixed(1)}%</td>
+      <td class="num">${row.trades}</td>
     </tr>`).join('');
 }
 
@@ -226,10 +258,13 @@ fetch('data.json')
   .then(response => response.json())
   .then(json => {
     data = json;
-    el('summary').textContent = `${data.symbol} を、架空の元金 ${money(data.start_cash)} で売買しています。${data.dates[0]} から ${data.dates[data.dates.length - 1]} まで。最終更新 ${data.updated}。`;
+    const days = data.dates.length;
+    const period = days ? `記録は ${data.dates[0]} から ${data.dates[days - 1]} まで（${days} 日ぶん）。` : `記録は ${data.live_start} 以降の最初の取引日から始まります。`;
+    el('summary').textContent = `${data.symbol} を、架空の元金 ${money(data.start_cash)} で売買しています。${period}最終更新 ${data.updated}。`;
     renderCards();
     renderChart();
     renderTrades();
+    renderBacktest();
     el('chart').addEventListener('pointermove', showTip);
     el('chart').addEventListener('pointerleave', hideTip);
   })
